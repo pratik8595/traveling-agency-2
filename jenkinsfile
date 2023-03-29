@@ -1,43 +1,81 @@
-pipeline{
+pipeline {
     agent any
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        IMAGE_NAME = 'travel-agency/travel-agency'
+        CLUSTER_NAME = 'travel-agency'
+        SERVICE_NAME = 'service2'
+    }
+
     stages {
-        stage('Git clone') {
-            steps{
-                git branch: 'master',
-                url: 'https://github.com/rohit1097/traveling-agency.git'
+        stage('Checkout') {
+            steps {
+                checkout scmGit(branches: [[name: '*/master']], extensions: [], userRemoteConfigs: [[credentialsId: '220ab108-f411-48ea-994d-784881cda11d', url: 'https://github.com/pratik8595/traveling-agency-2.git']])
             }
         }
-        stage('Building docker image') {
+
+        stage('Git Log') {
             steps {
                 script {
-                  sh 'docker build -t traveling-agency .'
+                    def gitLog = sh(script: 'git log --oneline -n 10', returnStdout: true).trim()
+                    echo "Git log:"
+                    echo "${gitLog}"
                 }
             }
         }
-        stage('ECR login & pushing image') {
+        stage('Build') {
             steps {
                 script {
-                  sh 'aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 943696395732.dkr.ecr.us-east-1.amazonaws.com'    
-                  sh 'docker tag traveling-agency:latest 943696395732.dkr.ecr.us-east-1.amazonaws.com/traveling-agency:latest'
-                  sh 'docker push 943696395732.dkr.ecr.us-east-1.amazonaws.com/traveling-agency:latest'
+                    def image = docker.build(env.IMAGE_NAME, ".")
+                    sh "docker tag ${env.IMAGE_NAME}:latest ${env.IMAGE_NAME}:${env.BUILD_NUMBER}"
                 }
             }
         }
-        stage('EKS-cluster loging') {
-            steps {
-                  sh 'rm -rf ~/.kube/config'                  
-                  sh "aws eks --region us-east-1 update-kubeconfig --name r-eks"
-        }
-    }  
-        stage('Deplyment & service on eks-cluster') {
-            steps {
+	    stage('build cleanup') {
+             steps {
                 script {
-                  sh 'kubectl delete -f deployment.yaml'
-                  sh 'kubectl apply -f deployment.yaml'
-                  sh 'kubectl apply -f service.yaml'
+                properties([buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '', numToKeepStr: '5'))])
+              }
+            }
+        }
+        
+        stage('Push to ECR') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AKIAUYPKSJWFCTCGWBBU', secretKeyVariable: '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']]) {
+                 script {
+                        def ecr = dockerRegistry.fromRegistry("https://${327446318474}.dkr.ecr.${AWS_REGION}.amazonaws.com")
+                        docker.withRegistry(ecr, "ecr:us-east-1") {
+                            dockerImage.push()
+                            dockerImage.push("${env.IMAGE_NAME}:${env.BUILD_NUMBER}")
+                        }
+                    }
                 }
             }
         }
 
+        stage('Deploy to ECS') {
+            steps {
+                 script {
+                    def ecsParams = [
+                        cluster: env.CLUSTER_NAME,
+                        service: env.SERVICE_NAME,
+                        image: "${env.IMAGE_NAME}:${env.BUILD_NUMBER}",
+                        region: env.AWS_REGION
+                    ]
+                    ecsDeploy(
+                        credentialsId: '327446318474',
+                        cluster: ecsParams.cluster,
+                        serviceName: ecsParams.service,
+                        image: ecsParams.image,
+                        region: ecsParams.region,
+                        tag: env.BUILD_NUMBER
+                    )
+                }
+            }
+        }
     }
-}    
+}
+
+
+
